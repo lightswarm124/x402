@@ -34,6 +34,24 @@ deterministic native-BCH P2PKH payment fixture shared with the Rust
 output, merchant amount, payer, transaction ID, and fee so integrations can
 compare results across both SDKs.
 
+## Electrum endpoint redundancy
+
+The `FulcrumProvider` accepts an injected `FulcrumTransport`; it does not
+silently select or trust a public server. For live deployments, applications
+should configure a failover transport with more than one endpoint and prefer
+TLS (port `50002`) or WSS (port `50004`) where available. The following set is
+the BCH Electrum set referenced by CashScript's network-provider sources and
+migration notes:
+
+| Network | Endpoints                                                      |
+| ------- | -------------------------------------------------------------- |
+| Mainnet | `bch.imaginary.cash`, `blackie.c3-soft.com`, `electroncash.dk` |
+| Chipnet | `chipnet.bch.ninja`                                            |
+
+Availability redundancy is not chain verification. A failover transport may
+retry a request against another server, but applications should compare chain
+tip/header data across independent servers when making operational decisions.
+
 ## Facilitator
 
 ```ts
