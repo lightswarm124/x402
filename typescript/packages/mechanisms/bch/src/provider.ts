@@ -14,6 +14,31 @@ export interface FulcrumTransport {
 }
 
 /**
+ * Sequentially retries Fulcrum requests across caller-provided transports.
+ *
+ * Endpoint construction, TLS certificate validation, and endpoint ordering
+ * remain application responsibilities. This helper only provides availability
+ * failover; it does not validate chain consistency or SPV proofs.
+ */
+export class FailoverFulcrumTransport implements FulcrumTransport {
+  constructor(private readonly transports: readonly FulcrumTransport[]) {
+    if (transports.length === 0) throw new Error('at least one Fulcrum transport is required');
+  }
+
+  async request(method: string, params: unknown[]): Promise<unknown> {
+    const errors: string[] = [];
+    for (const transport of this.transports) {
+      try {
+        return await transport.request(method, params);
+      } catch (error) {
+        errors.push(String(error));
+      }
+    }
+    throw new Error(`all Fulcrum transports failed: ${errors.join('; ')}`);
+  }
+}
+
+/**
  * Fulcrum Electrum Cash provider adapter.
  *
  * The transport is injected so Node TCP/TLS, browser WebSocket, and hosted

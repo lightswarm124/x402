@@ -48,6 +48,17 @@ migration notes:
 | Mainnet | `bch.imaginary.cash`, `blackie.c3-soft.com`, `electroncash.dk` |
 | Chipnet | `chipnet.bch.ninja`                                            |
 
+`FailoverFulcrumTransport` provides the minimum sequential failover behavior:
+pass it caller-created transports in the desired order. It retries all
+requests, including broadcasts; if a broadcast response is lost after the
+server accepts a transaction, applications must reconcile the result by
+checking transaction status rather than assuming the broadcast failed.
+
+```ts
+const transport = new FailoverFulcrumTransport([primaryTransport, secondaryTransport]);
+const provider = new FulcrumProvider('bch:bitcoincash', transport);
+```
+
 Availability redundancy is not chain verification. A failover transport may
 retry a request against another server, but applications should compare chain
 tip/header data across independent servers when making operational decisions.

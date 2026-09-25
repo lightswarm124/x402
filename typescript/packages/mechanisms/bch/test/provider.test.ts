@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { encodeCashAddr, hash160, p2pkhScript } from '../src/crypto';
-import { FulcrumProvider } from '../src/provider';
+import { FailoverFulcrumTransport, FulcrumProvider } from '../src/provider';
 import { createSecp256k1BchSigner } from '../src/signer';
 
 describe('Fulcrum provider adapter', () => {
@@ -60,5 +60,36 @@ describe('Fulcrum provider adapter', () => {
     await expect(provider.getTransactionStatus('11'.repeat(32))).resolves.toEqual({
       kind: 'mempool',
     });
+  });
+
+  it('fails over to the next caller-provided transport', async () => {
+    const attempts: string[] = [];
+    const transport = new FailoverFulcrumTransport([
+      {
+        async request(method) {
+          attempts.push(`offline:${method}`);
+          throw new Error('offline');
+        },
+      },
+      {
+        async request(method) {
+          attempts.push(`online:${method}`);
+          return { height: 123 };
+        },
+      },
+    ]);
+    const provider = new FulcrumProvider('bch:bitcoincash', transport);
+
+    await expect(provider.getTipHeight()).resolves.toBe(123);
+    expect(attempts).toEqual([
+      'offline:blockchain.headers.subscribe',
+      'online:blockchain.headers.subscribe',
+    ]);
+  });
+
+  it('rejects an empty failover set', () => {
+    expect(() => new FailoverFulcrumTransport([])).toThrow(
+      'at least one Fulcrum transport is required',
+    );
   });
 });
