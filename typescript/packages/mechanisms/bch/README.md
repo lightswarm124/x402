@@ -52,6 +52,13 @@ Availability redundancy is not chain verification. A failover transport may
 retry a request against another server, but applications should compare chain
 tip/header data across independent servers when making operational decisions.
 
+In the 2026-09-25 live smoke test, `bch.imaginary.cash` and
+`blackie.c3-soft.com` both passed the TypeScript provider over TLS and returned
+the same mainnet tip; `chipnet.bch.ninja` passed the same check for chipnet.
+`electroncash.dk` was reachable, but its TLS certificate was not trusted by a
+standard Node.js trust store. Do not disable certificate validation to include
+it in a failover set; use it only with an explicitly reviewed trust policy.
+
 ## Facilitator
 
 ```ts
