@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeCashAddr,
   encodeCashAddr,
+  hexToBytes,
   hash160,
   parseTransaction,
   p2pkhScript,
@@ -12,6 +13,7 @@ import {
 import { buildAndSignTransaction } from '../src/exact/client/scheme';
 import { createSecp256k1BchSigner } from '../src/signer';
 import type { BchNetwork } from '../src/types';
+import fixture from './fixtures/bch-exact-p2pkh.json';
 
 const NETWORK: BchNetwork = 'bch:bitcoincash';
 const SECRET_KEY = new Uint8Array(32).fill(1);
@@ -55,5 +57,48 @@ describe('BCH CashAddr and transaction primitives', () => {
     expect(result.payer).toBe(payerAddress);
     expect(result.fee).toBe(226n);
     expect(result.txid).toBe(transactionId(transaction));
+  });
+
+  it('verifies the deterministic BCH exact interoperability fixture', () => {
+    const transaction = parseTransaction(hexToBytes(fixture.rawTransaction));
+    const merchantHash = decodeCashAddr(fixture.payTo, fixture.network);
+    const result = verifyPayment(
+      transaction,
+      [
+        {
+          value: BigInt(fixture.sourceValue),
+          scriptPubKey: hexToBytes(fixture.sourceScriptPubKey),
+        },
+      ],
+      fixture.network,
+      p2pkhScript(merchantHash),
+      BigInt(fixture.amount),
+    );
+
+    expect(result).toMatchObject({
+      txid: fixture.txid,
+      payer: fixture.payer,
+      fee: BigInt(fixture.fee),
+    });
+    expect(serializeTransaction(transaction).length).toBe(fixture.serializedSize);
+  });
+
+  it('rejects dust payments and trailing transaction bytes', () => {
+    const transactionBytes = hexToBytes(fixture.rawTransaction);
+    const transaction = parseTransaction(transactionBytes);
+    const merchantHash = decodeCashAddr(fixture.payTo, fixture.network);
+    const source = [
+      {
+        value: BigInt(fixture.sourceValue),
+        scriptPubKey: hexToBytes(fixture.sourceScriptPubKey),
+      },
+    ];
+
+    expect(() =>
+      verifyPayment(transaction, source, fixture.network, p2pkhScript(merchantHash), 545n),
+    ).toThrow('merchant output is dust');
+    expect(() => parseTransaction(Uint8Array.from([...transactionBytes, 0]))).toThrow(
+      'trailing transaction bytes',
+    );
   });
 });
