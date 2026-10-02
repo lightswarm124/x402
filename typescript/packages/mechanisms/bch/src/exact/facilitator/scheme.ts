@@ -9,7 +9,7 @@ import {
   DEFAULT_BCH_POLICY,
   base64ToBytes,
   createBchPaymentTarget,
-  decodeCashAddrScript,
+  decodeBchAddressScript,
   parseTransaction,
   transactionId,
   verifyPayment,
@@ -24,6 +24,12 @@ import type {
 } from '../../types';
 import { InMemoryBchSettlementStore, type BchSettlementStore } from '../../settlementStore';
 
+/**
+ * x402 exact facilitator scheme for BCH.
+ *
+ * The provider supplies authoritative source outputs and chain status. This
+ * scheme validates and broadcasts the payer-signed transaction unchanged.
+ */
 export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
   readonly scheme = 'exact';
   readonly caipFamily = 'bch:*';
@@ -41,23 +47,36 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
         ? {}
         : { feeRateSatPerByte: config.feeRateSatPerByte }),
       ...(config.dustThreshold === undefined ? {} : { dustThreshold: config.dustThreshold }),
+      ...(config.cashTokenDustThreshold === undefined
+        ? {}
+        : { cashTokenDustThreshold: config.cashTokenDustThreshold }),
       ...(config.maxTransactionSize === undefined
         ? {}
         : { maxTransactionSize: config.maxTransactionSize }),
       ...(config.maxInputs === undefined ? {} : { maxInputs: config.maxInputs }),
+      ...(config.maxOutputs === undefined ? {} : { maxOutputs: config.maxOutputs }),
     };
     this.strategy = config.settlementStrategy ?? { kind: 'confirmations', count: 1 };
     this.settlementStore = config.settlementStore ?? new InMemoryBchSettlementStore();
   }
 
+  /** BCH has no facilitator signer or fee-sponsorship metadata. */
   getExtra(_network: string): undefined {
     return undefined;
   }
 
+  /** Return no facilitator signers; the payer signs the complete transaction. */
   getSigners(_network: string): string[] {
     return [];
   }
 
+  /**
+   * Verify the signed transaction without broadcasting it.
+   *
+   * @param payload x402 payload containing the serialized BCH transaction.
+   * @param requirements Expected merchant payment requirements.
+   * @returns A validity response with the recovered payer when valid.
+   */
   async verify(
     payload: PaymentPayload,
     requirements: PaymentRequirements,
@@ -74,6 +93,13 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
     }
   }
 
+  /**
+   * Verify, broadcast, and settle a payment idempotently.
+   *
+   * @param payload x402 payload containing the serialized BCH transaction.
+   * @param requirements Expected merchant payment requirements.
+   * @returns Settlement status, transaction ID, and network information.
+   */
   async settle(
     payload: PaymentPayload,
     requirements: PaymentRequirements,
@@ -141,18 +167,39 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
     try {
       txid = await this.provider.broadcast(rawTransaction);
     } catch (error) {
-      const status = await this.provider.getTransactionStatus(verified.txid);
-      if (status.kind !== 'mempool' && status.kind !== 'confirmed') {
-        await this.settlementStore.release(verified.txid);
+      const message = error instanceof Error ? error.message : String(error);
+      let status: Awaited<ReturnType<BchProvider['getTransactionStatus']>>;
+      try {
+        status = await this.provider.getTransactionStatus(verified.txid);
+      } catch {
         return {
           success: false,
-          errorReason: `broadcast_failed:${error instanceof Error ? error.message : String(error)}`,
+          errorReason: `broadcast outcome unknown:${message}`,
           transaction: verified.txid,
           network: this.provider.network,
           payer: verified.payer,
         };
       }
-      txid = verified.txid;
+      if (status.kind === 'mempool' || status.kind === 'confirmed') {
+        txid = verified.txid;
+      } else if (status.kind === 'notFound') {
+        await this.settlementStore.release(verified.txid);
+        return {
+          success: false,
+          errorReason: `broadcast_failed:${message}`,
+          transaction: verified.txid,
+          network: this.provider.network,
+          payer: verified.payer,
+        };
+      } else {
+        return {
+          success: false,
+          errorReason: `broadcast outcome unknown:${message}`,
+          transaction: verified.txid,
+          network: this.provider.network,
+          payer: verified.payer,
+        };
+      }
     }
     if (txid.toLowerCase() !== verified.txid.toLowerCase()) {
       await this.settlementStore.release(verified.txid);
@@ -166,7 +213,11 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
     }
 
     const status = await this.provider.getTransactionStatus(txid);
-    const accepted = await this.acceptSettlement(txid, status);
+    // The node accepted the broadcast; Fulcrum indexes its mempool a moment later.
+    const accepted = await this.acceptSettlement(
+      txid,
+      status.kind === 'notFound' ? { kind: 'mempool' } : status,
+    );
     if (!accepted) {
       return {
         success: false,
@@ -198,8 +249,14 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
     if (typeof body.transaction !== 'string') throw new Error('missing signed BCH transaction');
     const raw = base64ToBytes(body.transaction);
     const transaction = parseTransaction(raw);
-    const merchant = decodeCashAddrScript(typed.payTo, typed.network);
-    const target = createBchPaymentTarget(typed.asset, typed.amount, typed.extra, this.policy);
+    const merchant = decodeBchAddressScript(typed.payTo, typed.network);
+    const target = createBchPaymentTarget(
+      typed.asset,
+      typed.amount,
+      typed.extra,
+      this.policy,
+      merchant.scriptPubKey,
+    );
     if (target.kind === 'cashtoken' && !merchant.tokenSupport) {
       throw new Error('CashToken payments require a token-support merchant CashAddr');
     }
@@ -239,10 +296,12 @@ export class ExactBchFacilitatorScheme implements SchemeNetworkFacilitator {
   }
 }
 
+/** Canonicalize request/resource identity for settlement replay protection. */
 function settlementBinding(payload: PaymentPayload, requirements: PaymentRequirements): string {
   return stableSerialize({ accepted: requirements, resource: payload.resource ?? null });
 }
 
+/** Deterministically serialize JSON-like values without external state. */
 function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
   if (value !== null && typeof value === 'object') {
@@ -261,6 +320,7 @@ type VerifiedBchPayment = {
   transaction: ReturnType<typeof parseTransaction>;
 };
 
+/** Validate facilitator-facing BCH requirements and network identity. */
 function validateRequirements(
   value: PaymentRequirements,
   network: ExactBchRequirements['network'],

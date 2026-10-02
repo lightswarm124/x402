@@ -1,12 +1,12 @@
 import { sha256 } from '@noble/hashes/sha256';
 import {
-  decodeCashAddr,
+  MAX_TOKEN_COMMITMENT_LENGTH,
+  decodeBchAddressScript,
   hexToBytes,
-  isP2pkhScript,
-  p2pkhScript,
   bytesToHex,
-  type BchToken,
+  type CashToken,
 } from './crypto';
+import { MAX_CASH_TOKEN_AMOUNT, MAX_U64 } from './constants';
 import type {
   BchNetwork,
   BchOutPoint,
@@ -18,6 +18,7 @@ import type {
 } from './types';
 
 export interface FulcrumTransport {
+  /** Execute one Electrum Cash JSON-RPC method. */
   request(method: string, params: unknown[]): Promise<unknown>;
 }
 
@@ -59,6 +60,7 @@ export class FulcrumProvider implements BchProvider {
     private readonly transport: FulcrumTransport,
   ) {}
 
+  /** Fetch and parse one authoritative transaction output. */
   async getSourceOutput(outpoint: BchOutPoint): Promise<BchSourceOutput> {
     const transaction = await this.transport.request('blockchain.transaction.get', [
       outpoint.txid,
@@ -79,9 +81,9 @@ export class FulcrumProvider implements BchProvider {
     };
   }
 
+  /** Query Fulcrum for unspent outputs belonging to an address/script. */
   async listUtxos(address: string): Promise<BchUtxo[]> {
-    const hash = decodeCashAddr(address, this.network);
-    const script = p2pkhScript(hash);
+    const { scriptPubKey: script } = decodeBchAddressScript(address, this.network);
     const scriptHash = sha256(script).slice().reverse();
     const result = await this.transport.request('blockchain.scripthash.listunspent', [
       bytesToHex(scriptHash),
@@ -108,11 +110,11 @@ export class FulcrumProvider implements BchProvider {
     });
   }
 
+  /** Determine whether the specified source outpoint remains unspent. */
   async getOutpointStatus(
     outpoint: BchOutPoint,
     source: BchSourceOutput,
   ): Promise<BchOutpointStatus> {
-    if (!isP2pkhScript(source.scriptPubKey)) return 'unknown';
     const scriptHash = sha256(source.scriptPubKey).slice().reverse();
     const result = await this.transport.request('blockchain.scripthash.listunspent', [
       bytesToHex(scriptHash),
@@ -129,6 +131,7 @@ export class FulcrumProvider implements BchProvider {
     return unspent ? 'unspent' : 'spent';
   }
 
+  /** Broadcast raw transaction bytes through Fulcrum. */
   async broadcast(rawTransaction: Uint8Array): Promise<string> {
     const result = await this.transport.request('blockchain.transaction.broadcast', [
       bytesToHex(rawTransaction),
@@ -139,6 +142,7 @@ export class FulcrumProvider implements BchProvider {
     return result.toLowerCase();
   }
 
+  /** Map Fulcrum height state to the package transaction status model. */
   async getTransactionStatus(txid: string): Promise<BchTransactionStatus> {
     try {
       const result = await this.transport.request('blockchain.transaction.get_height', [txid]);
@@ -159,6 +163,7 @@ export class FulcrumProvider implements BchProvider {
     }
   }
 
+  /** Return the current Fulcrum chain tip height. */
   async getTipHeight(): Promise<number> {
     const result = await this.transport.request('blockchain.headers.subscribe', []);
     const height = getNumber(getObject(result).height);
@@ -166,6 +171,7 @@ export class FulcrumProvider implements BchProvider {
     return height;
   }
 
+  /** Check Fulcrum for a double-spend proof for an unconfirmed transaction. */
   async hasDoubleSpendProof(txid: string): Promise<boolean> {
     const result = await this.transport.request('blockchain.transaction.dsproof.get', [txid]);
     return result !== null && result !== undefined && result !== '';
@@ -193,7 +199,7 @@ function parseBchAmount(value: unknown): bigint {
     if (unscaled % divisor !== 0n) throw new Error('BCH amount has more than 8 decimals');
     amount = unscaled / divisor;
   }
-  if (amount > 0xffffffffffffffffn) throw new Error('BCH amount exceeds u64');
+  if (amount > MAX_U64) throw new Error('BCH amount exceeds u64');
   return amount;
 }
 
@@ -201,18 +207,18 @@ function parseSatoshiAmount(value: unknown): bigint {
   const text = typeof value === 'number' || typeof value === 'string' ? String(value) : '';
   if (!/^(0|[1-9][0-9]*)$/.test(text)) throw new Error('invalid BCH satoshi amount');
   const amount = BigInt(text);
-  if (amount > 0xffffffffffffffffn) throw new Error('BCH satoshi amount exceeds u64');
+  if (amount > MAX_U64) throw new Error('BCH satoshi amount exceeds u64');
   return amount;
 }
 
-function parseTokenData(value: unknown): BchToken | undefined {
+function parseTokenData(value: unknown): CashToken | undefined {
   if (value === undefined || value === null) return undefined;
   const object = getObject(value);
   const category = String(object.category ?? '');
   if (!/^[0-9a-fA-F]{64}$/.test(category)) throw new Error('invalid CashToken category');
   const amount = object.amount === undefined ? 0n : parseTokenAmount(object.amount);
   const rawNft = object.nft;
-  let nft: BchToken['nft'];
+  let nft: CashToken['nft'];
   if (rawNft !== undefined && rawNft !== null) {
     const nftObject = getObject(rawNft);
     const capability = String(nftObject.capability ?? 'none');
@@ -220,8 +226,13 @@ function parseTokenData(value: unknown): BchToken | undefined {
       throw new Error('invalid CashToken NFT capability');
     }
     const commitmentValue = nftObject.commitmentHex ?? nftObject.commitment ?? '';
-    const commitment =
-      typeof commitmentValue === 'string' ? hexToBytes(commitmentValue) : new Uint8Array();
+    if (typeof commitmentValue !== 'string' || !/^(?:[0-9a-fA-F]{2})*$/.test(commitmentValue)) {
+      throw new Error('CashToken NFT commitment must be hex');
+    }
+    const commitment = hexToBytes(commitmentValue);
+    if (commitment.length > MAX_TOKEN_COMMITMENT_LENGTH) {
+      throw new Error('CashToken commitment is too large');
+    }
     nft = { capability, commitment };
   }
   if (amount === 0n && nft === undefined) throw new Error('CashToken output has no token data');
@@ -232,7 +243,7 @@ function parseTokenAmount(value: unknown): bigint {
   const text = typeof value === 'number' || typeof value === 'string' ? String(value) : '';
   if (!/^(0|[1-9][0-9]*)$/.test(text)) throw new Error('invalid CashToken amount');
   const amount = BigInt(text);
-  if (amount > 0x7fffffffffffffffn) throw new Error('CashToken amount exceeds BCH limits');
+  if (amount > MAX_CASH_TOKEN_AMOUNT) throw new Error('CashToken amount exceeds BCH limits');
   return amount;
 }
 

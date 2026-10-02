@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { encodeCashAddr, hash160, p2pkhScript } from '../src/crypto';
+import { encodeBase58Address } from '@bitauth/libauth';
+import {
+  encodeCashAddr,
+  encodeCashAddrScript,
+  hash160,
+  p2pkhScript,
+  p2sh32Script,
+} from '../src/crypto';
 import { FailoverFulcrumTransport, FulcrumProvider } from '../src/provider';
 import { createSecp256k1BchSignerFromMnemonic } from '../src/signer';
 
@@ -89,6 +96,66 @@ describe('Fulcrum provider adapter', () => {
     const [utxo] = await provider.listUtxos(signer.getAddress(network));
     expect(utxo.token).toEqual({ category: '33'.repeat(32), amount: 1000n });
     expect(utxo.value).toBe(10_000n);
+  });
+
+  it('checks spend status for a P2SH32 source output', async () => {
+    const scriptPubKey = p2sh32Script(new Uint8Array(32).fill(0x44));
+    const provider = new FulcrumProvider('bch:bitcoincash', {
+      async request(method, params) {
+        expect(method).toBe('blockchain.scripthash.listunspent');
+        expect(params[0]).toMatch(/^[0-9a-f]{64}$/);
+        return [{ tx_hash: '44'.repeat(32), tx_pos: 1, value: '1000', height: 0 }];
+      },
+    });
+
+    await expect(
+      provider.getOutpointStatus(
+        { txid: '44'.repeat(32), vout: 1 },
+        { value: 1000n, scriptPubKey },
+      ),
+    ).resolves.toBe('unspent');
+  });
+
+  it('discovers UTXOs for a P2SH32 CashScript address', async () => {
+    const network = 'bch:bitcoincash' as const;
+    const scriptPubKey = p2sh32Script(new Uint8Array(32).fill(0x55));
+    const address = encodeCashAddrScript(scriptPubKey, network, true);
+    const provider = new FulcrumProvider(network, {
+      async request(method, params) {
+        expect(method).toBe('blockchain.scripthash.listunspent');
+        expect(params[1]).toBe('include_tokens');
+        return [
+          {
+            tx_hash: '55'.repeat(32),
+            tx_pos: 0,
+            value: '687',
+            height: 0,
+            tokenData: { category: '66'.repeat(32), amount: '1' },
+          },
+        ];
+      },
+    });
+
+    const [utxo] = await provider.listUtxos(address);
+    expect(utxo.scriptPubKey).toEqual(scriptPubKey);
+    expect(utxo.token).toEqual({ category: '66'.repeat(32), amount: 1n });
+  });
+
+  it('discovers UTXOs for a legacy mainnet P2PKH address', async () => {
+    const network = 'bch:bitcoincash' as const;
+    const hash = new Uint8Array(20).fill(0x77);
+    const address = encodeBase58Address('p2pkh', hash);
+    const scriptPubKey = p2pkhScript(hash);
+    const provider = new FulcrumProvider(network, {
+      async request(method, params) {
+        expect(method).toBe('blockchain.scripthash.listunspent');
+        expect(params[1]).toBe('include_tokens');
+        return [{ tx_hash: '77'.repeat(32), tx_pos: 0, value: '546', height: 1 }];
+      },
+    });
+
+    const [utxo] = await provider.listUtxos(address);
+    expect(utxo.scriptPubKey).toEqual(scriptPubKey);
   });
 
   it('maps Fulcrum transaction-not-found errors to notFound status', async () => {

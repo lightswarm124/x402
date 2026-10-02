@@ -7,8 +7,11 @@
  * running more than one facilitator instance should provide a shared store.
  */
 export interface BchSettlementStore {
+  /** Atomically claim a transaction for a canonical request binding. */
   claim(txid: string, binding: string): Promise<'acquired' | 'same' | 'conflict'>;
+  /** Mark a claimed transaction as accepted so it cannot be released. */
   markAccepted(txid: string): Promise<void>;
+  /** Release a failed, not-yet-accepted claim for retry. */
   release(txid: string): Promise<void>;
 }
 

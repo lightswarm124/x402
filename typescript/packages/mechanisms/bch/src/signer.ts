@@ -5,6 +5,7 @@ import {
   secp256k1,
 } from '@bitauth/libauth';
 import { encodeCashAddr, hash160 } from './crypto';
+import { BCH_MAINNET_BIP44_COIN_TYPE, CHIPNET_BIP44_COIN_TYPE } from './constants';
 import type {
   BchHdDiscoveryOptions,
   BchNetwork,
@@ -13,6 +14,7 @@ import type {
   BchWalletAddress,
 } from './types';
 
+/** Create the default compressed-key BCH signer around one private key. */
 function createSecp256k1BchSigner(privateKey: Uint8Array): BchSigner {
   const publicKey = secp256k1.derivePublicKeyCompressed(privateKey);
   if (typeof publicKey === 'string') throw new Error(publicKey);
@@ -27,12 +29,9 @@ function createSecp256k1BchSigner(privateKey: Uint8Array): BchSigner {
   };
 }
 
-/** SLIP-0044 coin type used by BCH chipnet wallets. */
-export const CHIPNET_BIP44_COIN_TYPE = 1;
+export { BCH_MAINNET_BIP44_COIN_TYPE, CHIPNET_BIP44_COIN_TYPE } from './constants';
 
-/** SLIP-0044 coin type used by BCH mainnet wallets. */
-export const BCH_MAINNET_BIP44_COIN_TYPE = 145;
-
+/** Options for mnemonic-based BIP44 signer derivation. */
 export type BchMnemonicSignerOptions = {
   /** BIP39 passphrase, if the wallet uses one. */
   passphrase?: string;
@@ -89,6 +88,12 @@ export function createSecp256k1BchSignerFromMnemonic(
 /**
  * Derive one BCH wallet address without exposing the derived key material.
  * This is intended for wallet adapters and discovery, not the x402 scheme API.
+ *
+ * @param mnemonic BIP39 mnemonic held by the wallet process.
+ * @param network BCH network used to encode the resulting CashAddr.
+ * @param change BIP44 branch (`0` receive, `1` change).
+ * @param index Address index within the branch.
+ * @returns Address and derivation metadata; private key material is discarded.
  */
 export function deriveBchWalletAddress(
   mnemonic: string,
@@ -117,7 +122,10 @@ export function deriveBchWalletAddress(
   };
 }
 
-/** Discover used and gap-limit-bounded BCH addresses on both BIP44 branches. */
+/**
+ * Discover used and gap-limit-bounded BCH addresses on both BIP44 branches.
+ * The provider is queried for each derived address; no wallet state is written.
+ */
 export async function discoverBchHdWalletAddresses(
   mnemonic: string,
   network: BchNetwork,

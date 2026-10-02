@@ -3,12 +3,14 @@ import {
   decodeCashAddr,
   decodeCashAddrScript,
   createBchPaymentTarget,
+  doubleSha256,
   encodeCashAddr,
   hexToBytes,
   hash160,
   parseTransaction,
   p2pkhScript,
   p2sh32Script,
+  pushData,
   serializeTransaction,
   signingHash,
   transactionId,
@@ -38,7 +40,7 @@ describe('BCH CashAddr and transaction primitives', () => {
     expect(request).toEqual({
       network: 'chipnet',
       recipient: { address: 'bchtest:qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zye3kwllue' },
-      amount: 1000n,
+      value: 1000n,
     });
   });
 
@@ -69,6 +71,15 @@ describe('BCH CashAddr and transaction primitives', () => {
       target,
       signer,
     );
+    expect(
+      verifyPayment(
+        transaction,
+        selected.map(({ value, scriptPubKey, token }) => ({ value, scriptPubKey, token })),
+        NETWORK,
+        merchant.scriptPubKey,
+        target,
+      ),
+    ).toMatchObject({ payer: signer.getAddress(NETWORK) });
     expect(transaction.outputs[0]?.token).toEqual({
       category,
       amount: 0n,
@@ -168,7 +179,64 @@ describe('BCH CashAddr and transaction primitives', () => {
     ).toThrow('CashToken amount is outside the BCH token range');
   });
 
-  it('verifies the shared CashToken P2SH32 interoperability fixture', () => {
+  it('accepts an NFT with an empty commitment', () => {
+    expect(
+      createBchPaymentTarget('00'.repeat(31) + '03', '0', {
+        assetTransferMethod: 'cashtoken',
+        token: {
+          category: '00'.repeat(31) + '03',
+          amount: '0',
+          nft: { capability: 'none', commitment: '' },
+        },
+      }),
+    ).toMatchObject({ kind: 'cashtoken', amount: 0n });
+  });
+
+  it('canonicalizes CashToken categories and rejects oversized commitments', () => {
+    const category = 'AB'.repeat(32);
+    expect(
+      createBchPaymentTarget(category, '1', {
+        assetTransferMethod: 'cashtoken',
+        token: { category: category.toLowerCase(), amount: '1' },
+      }),
+    ).toMatchObject({ kind: 'cashtoken', category: category.toLowerCase() });
+
+    expect(() =>
+      createBchPaymentTarget(category, '0', {
+        assetTransferMethod: 'cashtoken',
+        token: {
+          category,
+          amount: '0',
+          nft: { capability: 'none', commitment: 'aa'.repeat(129) },
+        },
+      }),
+    ).toThrow('CashToken commitment is too large');
+  });
+
+  it('sizes an omitted 128-byte NFT output above the 1,000-satoshi floor', () => {
+    const category = 'ab'.repeat(32);
+    const target = createBchPaymentTarget(
+      category,
+      '0',
+      {
+        assetTransferMethod: 'cashtoken',
+        token: {
+          category,
+          amount: '0',
+          nft: { capability: 'none', commitment: 'cd'.repeat(128) },
+        },
+      },
+      undefined,
+      p2pkhScript(new Uint8Array(20).fill(1)),
+    );
+    expect(target).toMatchObject({ kind: 'cashtoken' });
+    if (target.kind === 'cashtoken') {
+      expect(target.nft?.commitment).toHaveLength(128);
+      expect(target.merchantValue).toBeGreaterThan(1000n);
+    }
+  });
+
+  it('verifies the local CashToken P2SH32 fixture', () => {
     const transaction = parseTransaction(hexToBytes(cashtokenFixture.rawTransaction));
     const merchant = decodeCashAddrScript(cashtokenFixture.payTo, cashtokenFixture.network);
     const result = verifyPayment(
@@ -189,7 +257,7 @@ describe('BCH CashAddr and transaction primitives', () => {
         kind: 'cashtoken',
         category: cashtokenFixture.asset,
         amount: BigInt(cashtokenFixture.amount),
-        merchantValue: BigInt(cashtokenFixture.tokenOutputValue),
+        merchantValue: BigInt(cashtokenFixture.value),
       },
     );
 
@@ -231,7 +299,104 @@ describe('BCH CashAddr and transaction primitives', () => {
     expect(result.txid).toBe(transactionId(transaction));
   });
 
-  it('verifies the deterministic BCH exact interoperability fixture', () => {
+  it('accepts OP_RETURN metadata and arbitrary change scripts', async () => {
+    const signer = createSecp256k1BchSignerFromMnemonic(BIP39_VECTOR_MNEMONIC);
+    const payerScript = p2pkhScript(hash160(signer.getPublicKey()));
+    const merchantScript = p2sh32Script(new Uint8Array(32).fill(0x55));
+    const selected = [
+      {
+        txid: 'aa'.repeat(32),
+        vout: 0,
+        value: 100_000n,
+        scriptPubKey: payerScript,
+      },
+    ];
+    const transaction = await buildAndSignTransaction(selected, merchantScript, 1_000n, signer);
+    transaction.outputs[1].scriptPubKey = p2sh32Script(new Uint8Array(32).fill(0x66));
+    transaction.outputs[1].value -= 100n;
+    transaction.outputs.push({ value: 0n, scriptPubKey: Uint8Array.from([0x6a, 0x01, 0x01]) });
+    const signature = Uint8Array.from([
+      ...(await signer.signDigest(signingHash(transaction, 0, selected[0]))),
+      0x41,
+    ]);
+    transaction.inputs[0].scriptSig = Uint8Array.from([
+      ...pushData(signature),
+      ...pushData(signer.getPublicKey()),
+    ]);
+
+    expect(verifyPayment(transaction, selected, NETWORK, merchantScript, 1_000n)).toMatchObject({
+      payer: signer.getAddress(NETWORK),
+    });
+  });
+
+  it('validates a P2SH32 covenant-style input through the BCH VM', () => {
+    const redeemScript = Uint8Array.of(0x51);
+    const sourceScript = p2sh32Script(doubleSha256(redeemScript));
+    const merchantScript = p2pkhScript(new Uint8Array(20).fill(0x77));
+    const source = {
+      value: 100_000n,
+      scriptPubKey: sourceScript,
+    };
+    const transaction = {
+      version: 2,
+      inputs: [
+        {
+          outpoint: { txid: 'cc'.repeat(32), vout: 0 },
+          scriptSig: pushData(redeemScript),
+          sequence: 0xffffffff,
+        },
+      ],
+      outputs: [
+        { value: 1_000n, scriptPubKey: merchantScript },
+        { value: 98_700n, scriptPubKey: sourceScript },
+      ],
+      lockTime: 0,
+    };
+
+    expect(verifyPayment(transaction, [source], NETWORK, merchantScript, 1_000n)).toMatchObject({
+      payer: expect.stringContaining('bitcoincash:'),
+    });
+  });
+
+  it('preserves unrelated CashToken state during a native BCH payment', async () => {
+    const signer = createSecp256k1BchSignerFromMnemonic(BIP39_VECTOR_MNEMONIC);
+    const payerScript = p2pkhScript(hash160(signer.getPublicKey()));
+    const merchantScript = p2pkhScript(new Uint8Array(20).fill(0x66));
+    const source = {
+      value: 100_000n,
+      scriptPubKey: payerScript,
+      token: { category: '77'.repeat(32), amount: 10n },
+    };
+    const transaction = {
+      version: 2,
+      inputs: [
+        {
+          outpoint: { txid: 'bb'.repeat(32), vout: 0 },
+          scriptSig: new Uint8Array(),
+          sequence: 0xffffffff,
+        },
+      ],
+      outputs: [
+        { value: 1_000n, scriptPubKey: merchantScript },
+        { value: 98_700n, scriptPubKey: payerScript, token: source.token },
+      ],
+      lockTime: 0,
+    };
+    const signature = Uint8Array.from([
+      ...(await signer.signDigest(signingHash(transaction, 0, source))),
+      0x41,
+    ]);
+    transaction.inputs[0].scriptSig = Uint8Array.from([
+      ...pushData(signature),
+      ...pushData(signer.getPublicKey()),
+    ]);
+
+    expect(verifyPayment(transaction, [source], NETWORK, merchantScript, 1_000n)).toMatchObject({
+      payer: signer.getAddress(NETWORK),
+    });
+  });
+
+  it('verifies the deterministic local BCH exact fixture', () => {
     const transaction = parseTransaction(hexToBytes(fixture.rawTransaction));
     const merchantHash = decodeCashAddr(fixture.payTo, fixture.network);
     const result = verifyPayment(
@@ -255,7 +420,7 @@ describe('BCH CashAddr and transaction primitives', () => {
     expect(serializeTransaction(transaction).length).toBe(fixture.serializedSize);
   });
 
-  it('verifies the shared two-input BCH interoperability fixture', () => {
+  it('verifies the local two-input BCH fixture', () => {
     const transaction = parseTransaction(hexToBytes(twoInputFixture.rawTransaction));
     const merchantHash = decodeCashAddr(twoInputFixture.payTo, twoInputFixture.network);
     const result = verifyPayment(
@@ -297,7 +462,7 @@ describe('BCH CashAddr and transaction primitives', () => {
     );
   });
 
-  it('rejects change sent to a different P2PKH owner', async () => {
+  it('accepts a valid payment whose change uses another P2PKH address', async () => {
     const signer = createSecp256k1BchSignerFromMnemonic(BIP39_VECTOR_MNEMONIC);
     const merchantScript = p2pkhScript(new Uint8Array(20).fill(0x22));
     const selected = [
@@ -325,7 +490,7 @@ describe('BCH CashAddr and transaction primitives', () => {
       ...[signature.length, ...signature],
       ...[signer.getPublicKey().length, ...signer.getPublicKey()],
     ]);
-    expect(() =>
+    expect(
       verifyPayment(
         tampered,
         selected.map(({ value, scriptPubKey }) => ({ value, scriptPubKey })),
@@ -333,6 +498,6 @@ describe('BCH CashAddr and transaction primitives', () => {
         merchantScript,
         1_000n,
       ),
-    ).toThrow('change output must return to the payer');
+    ).toMatchObject({ payer: signer.getAddress(NETWORK) });
   });
 });

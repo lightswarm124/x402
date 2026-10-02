@@ -1,6 +1,7 @@
 import { defineConfig } from 'tsup';
 
-const baseConfig = {
+// ESM only: Libauth initializes with top-level await, which require() cannot load.
+export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'exact/client/index': 'src/exact/client/index.ts',
@@ -10,9 +11,7 @@ const baseConfig = {
   dts: { resolve: true },
   sourcemap: true,
   target: 'es2020',
-};
-
-export default defineConfig([
-  { ...baseConfig, format: 'esm', outDir: 'dist/esm', clean: true },
-  { ...baseConfig, format: 'cjs', outDir: 'dist/cjs', clean: false, dts: false },
-]);
+  format: 'esm',
+  outDir: 'dist/esm',
+  clean: true,
+});

@@ -1,11 +1,10 @@
 {
   "name": "@x402/bch",
   "version": "2.27.0",
-  "main": "./dist/cjs/index.js",
-  "module": "./dist/esm/index.js",
-  "types": "./dist/cjs/index.d.ts",
+  "module": "./dist/esm/index.mjs",
+  "types": "./dist/esm/index.d.mts",
   "scripts": {
-    "build": "tsup && node ../../../scripts/mirror-cjs-dts.mjs",
+    "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
     "format:check": "prettier -c .prettierrc --check \"**/*.{ts,js,cjs,json,md}\"",
@@ -22,7 +21,8 @@
   "repository": "https://github.com/x402-foundation/x402",
   "description": "Bitcoin Cash exact payment mechanism for x402",
   "dependencies": {
-    "@bitauth/libauth": "^3.0.0",
+    "@bitauth/libauth": "3.1.0-next.8",
+    "@noble/hashes": "^1.8.0",
     "@x402/core": "workspace:~"
   },
   "devDependencies": {
@@ -46,40 +46,24 @@
       "import": {
         "types": "./dist/esm/index.d.mts",
         "default": "./dist/esm/index.mjs"
-      },
-      "require": {
-        "types": "./dist/cjs/index.d.ts",
-        "default": "./dist/cjs/index.js"
       }
     },
     "./exact/client": {
       "import": {
         "types": "./dist/esm/exact/client/index.d.mts",
         "default": "./dist/esm/exact/client/index.mjs"
-      },
-      "require": {
-        "types": "./dist/cjs/exact/client/index.d.ts",
-        "default": "./dist/cjs/exact/client/index.js"
       }
     },
     "./exact/server": {
       "import": {
         "types": "./dist/esm/exact/server/index.d.mts",
         "default": "./dist/esm/exact/server/index.mjs"
-      },
-      "require": {
-        "types": "./dist/cjs/exact/server/index.d.ts",
-        "default": "./dist/cjs/exact/server/index.js"
       }
     },
     "./exact/facilitator": {
       "import": {
         "types": "./dist/esm/exact/facilitator/index.d.mts",
         "default": "./dist/esm/exact/facilitator/index.mjs"
-      },
-      "require": {
-        "types": "./dist/cjs/exact/facilitator/index.d.ts",
-        "default": "./dist/cjs/exact/facilitator/index.js"
       }
     }
   },
